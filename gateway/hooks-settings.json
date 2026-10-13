@@ -1,0 +1,28 @@
+{
+  "permissions": { "defaultMode": "bypassPermissions" },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "node /usr/local/bin/gateway-hook.js pre_tool_use" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "node /usr/local/bin/gateway-hook.js post_tool_use" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node /usr/local/bin/gateway-hook.js stop" }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "deny_rules": [
+    {
+      "name": "force-delete-root",
+      "pattern": "rm\\s+-[a-zA-Z]*r[a-zA-Z]*\\s+(-[a-zA-Z]*\\s+)*(/|~|\\$HOME)(\\s|$)"
+    },
+    {
+      "name": "pipe-to-shell",
+      "pattern": "(curl|wget)[^|;&]*\\|\\s*(ba|z|k|da)?sh"
+    },
+    {
+      "name": "fork-bomb",
+      "pattern": ":\\(\\)\\s*\\{\\s*:\\|:&\\s*\\}"
+    },
+    {
+      "name": "disk-device-write",
+      "pattern": "dd\\s+[^;&]*of=/dev/"
+    },
+    {
+      "name": "credential-file-read",
+      "pattern": "(cat|less|head|tail)\\s+[^;&]*(\\.ssh/|\\.aws/|\\.gnupg/|id_rsa|id_ed25519)"
+    }
+  ],
+  "semantic": { "enabled": true, "block_on": ["medium", "high"] },
+  "network": {
+    "allow": [
+      "api.xiaomimimo.com",
+      "registry.npmjs.org",
+      "registry.npmmirror.com",
+      "github.com",
+      "*.github.com",
+      "raw.githubusercontent.com",
+      "nodejs.org",
+      "example.com",
+      "127.0.0.1"
+    ]
+  }
+}
