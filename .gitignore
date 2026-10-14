@@ -4,3 +4,7 @@ dist/
 *.db-wal
 *.db-shm
 .DS_Store
+
+# pnpm
+pnpm-debug.log
+.pnpm-store/

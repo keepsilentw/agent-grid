@@ -108,7 +108,7 @@ sequenceDiagram
 
 ## 6. 模块职责
 
-全部源码为 TypeScript（ESM），`npm run build` 用 `tsc` 编译到 `dist/`，运行走编译产物（`node dist/gateway/daemon.js`，要求 Node ≥ 24.2）。下表列的是源码路径，产物与源码同构；`tsc` 无法产出的非 TS 资产（`gateway/*.json`、`sandbox/`）由 `scripts/copy-assets.mjs` 拷进 `dist/`，所以 `dist/` 自带可运行。
+全部源码为 TypeScript（ESM），`pnpm run build`（或 `make build`）用 `tsc` 编译到 `dist/`，运行走编译产物（`node dist/gateway/daemon.js`，要求 Node ≥ 24.2；包管理器为 pnpm）。下表列的是源码路径，产物与源码同构；`tsc` 无法产出的非 TS 资产（`gateway/*.json`、`sandbox/`）由 `scripts/copy-assets.mjs` 拷进 `dist/`，所以 `dist/` 自带可运行。
 
 | 路径 | 职责 |
 |---|---|

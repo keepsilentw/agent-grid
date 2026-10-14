@@ -3,6 +3,7 @@
   "engines": {
     "node": ">=24.2"
   },
+  "packageManager": "pnpm@12.11.2",
   "scripts": {
     "build": "tsc && node scripts/copy-assets.mjs",
     "typecheck": "tsc --noEmit"
