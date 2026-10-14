@@ -2,44 +2,69 @@
 // Thread forking (phase 2): create a new task/run whose workspace is a copy
 // of a parent run's workspace, sharing the parent's thread lineage. The copy
 // gets a baseline commit so the child's diff contains only its own changes.
-// Merge of parallel threads is not implemented.
+// Merge of parallel threads is not implemented here -- see merge.ts.
 //
 // Usage:
-//   node orchestrator/fork.js <run_id> --goal "..." [--agent claude|codex]
+//   node dist/orchestrator/fork.js <run_id> --goal "..." [--agent claude|codex]
 //                             [--engine docker|local] [--workspace DIR] [--db agent.db]
 //                             [--gateway 0|1] [--semantic 0|1]
-const { randomUUID } = require('node:crypto');
-const fs = require('node:fs');
-const path = require('node:path');
-const { spawnSync } = require('node:child_process');
-const { open } = require('../lib/db.js');
-const { executeRun } = require('./execute.js');
-const { resolveTenant } = require('./tenant.js');
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { open } from '../lib/db.js';
+import { executeRun } from './execute.js';
+import { resolveTenant } from './tenant.js';
+import type { RunRow } from '../lib/types.js';
 
-function usage() {
-  console.error('usage: node orchestrator/fork.js <run_id> --goal "..." [--agent claude|codex] [--engine docker|local] [--workspace DIR] [--db agent.db] [--gateway 0|1] [--semantic 0|1]');
+interface ForkArgs {
+  parentRunId: string;
+  goal: string;
+  agent: string;
+  engine: string;
+  workspace: string | null;
+  db: string;
+  gateway: string;
+  semantic: string | null;
+  tenant: string | null;
+}
+
+/** Everything the CLI can set except the positional id and `--goal`. */
+type ForkFlags = Omit<ForkArgs, 'parentRunId' | 'goal'>;
+
+/** Flags that take a value; every other flag is `--goal` or a usage error. */
+const VALUE_FLAGS = ['agent', 'engine', 'workspace', 'db', 'gateway', 'semantic', 'tenant'] as const;
+type ValueFlag = typeof VALUE_FLAGS[number];
+
+function isValueFlag(key: string): key is ValueFlag {
+  return (VALUE_FLAGS as readonly string[]).includes(key);
+}
+
+function usage(): never {
+  console.error('usage: node dist/orchestrator/fork.js <run_id> --goal "..." [--agent claude|codex] [--engine docker|local] [--workspace DIR] [--db agent.db] [--gateway 0|1] [--semantic 0|1]');
   process.exit(2);
 }
 
-function parseArgs(argv) {
+function parseArgs(argv: string[]): ForkArgs {
   const [parentRunId, ...rest] = argv;
-  const args = {
-    parentRunId,
+  const flags: ForkFlags = {
     agent: 'claude', engine: 'local', workspace: null, db: 'agent.db',
     gateway: '1', semantic: null, tenant: null, // null = inherit parent's tenant
   };
+  let goal: string | undefined;
   for (let i = 0; i < rest.length; i += 2) {
-    const key = (rest[i] || '').replace(/^--/, '');
+    const key = (rest[i] ?? '').replace(/^--/, '');
     const val = rest[i + 1];
-    if (key === 'goal') args.goal = val;
-    else if (['agent', 'engine', 'workspace', 'db', 'gateway', 'semantic', 'tenant'].includes(key)) args[key] = val;
+    if (val === undefined) usage();
+    if (key === 'goal') goal = val;
+    else if (isValueFlag(key)) flags[key] = val;
     else usage();
   }
-  if (!parentRunId || parentRunId.startsWith('--') || !args.goal || rest.length % 2 !== 0) usage();
-  return args;
+  if (!parentRunId || parentRunId.startsWith('--') || !goal || rest.length % 2 !== 0) usage();
+  return { ...flags, parentRunId, goal };
 }
 
-function copyWorkspace(src, dst) {
+function copyWorkspace(src: string, dst: string): void {
   fs.cpSync(src, dst, {
     recursive: true,
     filter: (p) => {
@@ -54,13 +79,14 @@ function copyWorkspace(src, dst) {
     'commit', '-qm', `fork baseline from run ${src}`], { stdio: 'ignore' });
 }
 
-async function main() {
+async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const db = await open(args.db);
 
-  const parent = await db.prepare('SELECT * FROM runs WHERE id = ?').get(args.parentRunId);
+  const parent = await db.prepare('SELECT * FROM runs WHERE id = ?')
+    .get<RunRow>(args.parentRunId);
   if (!parent) { console.error(`run ${args.parentRunId} not found`); process.exit(2); }
-  if (!['succeeded', 'awaiting_approval'].includes(parent.status)) {
+  if (parent.status !== 'succeeded' && parent.status !== 'awaiting_approval') {
     console.error(`cannot fork from run in status ${parent.status}; need succeeded or awaiting_approval`);
     process.exit(2);
   }
@@ -69,7 +95,7 @@ async function main() {
     process.exit(2);
   }
 
-  const now = () => new Date().toISOString();
+  const now = (): string => new Date().toISOString();
   const taskId = randomUUID();
   const runId = randomUUID();
   // First run of a lineage uses its own id as the thread id; backfill the
@@ -86,7 +112,8 @@ async function main() {
   copyWorkspace(parent.workspace, workspace);
   console.log(`forked workspace ${parent.workspace} -> ${workspace}`);
 
-  const parentTenant = (await db.prepare('SELECT tenant_id FROM tasks WHERE id = ?').get(parent.task_id))?.tenant_id;
+  const parentTenant = (await db.prepare('SELECT tenant_id FROM tasks WHERE id = ?')
+    .get<{ tenant_id: string | null }>(parent.task_id))?.tenant_id;
   const tenantId = args.tenant
     ? await resolveTenant(db, args.tenant)
     : (parentTenant || await resolveTenant(db, 'default'));

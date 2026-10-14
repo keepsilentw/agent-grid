@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "es2024",
+    "lib": ["es2024"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+
+    // Sources compile into dist/, which is the tree you run:
+    //   npm run build && node dist/orchestrator/run.js
+    // Relative imports are written with the emitted .js extension -- nodenext
+    // resolves them back to the .ts source, and the emitted files match.
+    "rootDir": ".",
+    "outDir": "dist",
+    "sourceMap": true,
+    "verbatimModuleSyntax": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true
+  },
+  "include": ["lib/**/*.ts", "gateway/**/*.ts", "orchestrator/**/*.ts", "web/**/*.ts"]
+}

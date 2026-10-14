@@ -8,9 +8,11 @@
 //                       the control-plane collector ingests after the run.
 //
 // Usage (as configured in hooks-settings.json):
-//   node hook.js <pre_tool_use|post_tool_use|stop>   # JSON on stdin
-const fs = require('fs');
-const path = require('path');
+//   node dist/gateway/hook.js <pre_tool_use|post_tool_use|stop>   # JSON on stdin
+import fs from 'node:fs';
+import path from 'node:path';
+import { errMessage } from '../lib/errors.js';
+import type { Decision, HookEvent } from '../lib/types.js';
 
 const kind = process.argv[2] || 'unknown';
 const GATEWAY_URL = process.env.GATEWAY_URL;
@@ -20,15 +22,24 @@ const SINK = process.env.EVENT_SINK || '/workspace/.agent-grid/events.jsonl';
 // 60s hook timeout.
 const TIMEOUT_MS = kind === 'pre_tool_use' ? 55000 : 3000;
 
-function readStdin() {
+/** The subset of Claude Code's hook payload this gateway records. */
+interface HookInput {
+  hook_event_name?: string;
+  session_id?: string;
+  tool_name?: string;
+  tool_input?: unknown;
+  tool_response?: unknown;
+}
+
+function readStdin(): Promise<string> {
   return new Promise((resolve) => {
     let raw = '';
-    process.stdin.on('data', (d) => (raw += d));
+    process.stdin.on('data', (d: Buffer) => (raw += d));
     process.stdin.on('end', () => resolve(raw));
   });
 }
 
-function normalize(raw, hookInput) {
+function normalize(hookInput: HookInput): HookEvent {
   return {
     kind,
     ts: new Date().toISOString(),
@@ -40,7 +51,7 @@ function normalize(raw, hookInput) {
   };
 }
 
-async function realtime(ev, hookInput) {
+async function realtime(ev: HookEvent): Promise<void> {
   if (kind === 'pre_tool_use') {
     const r = await fetch(`${GATEWAY_URL}/v1/tool_call`, {
       method: 'POST',
@@ -51,7 +62,7 @@ async function realtime(ev, hookInput) {
         tool_name: ev.tool_name, tool_input: ev.tool_input,
       }),
     });
-    const verdict = await r.json();
+    const verdict = await r.json() as Decision;
     if (verdict.decision === 'deny') {
       // permissionDecision deny surfaces the reason to the agent, which
       // must then re-plan around the blocked call.
@@ -77,24 +88,24 @@ async function realtime(ev, hookInput) {
   }).catch(() => {}); // best-effort: never block the agent on bookkeeping
 }
 
-function offline(ev) {
+function offline(ev: HookEvent): void {
   fs.mkdirSync(path.dirname(SINK), { recursive: true });
   fs.appendFileSync(SINK, JSON.stringify(ev) + '\n');
 }
 
 (async () => {
   const raw = await readStdin();
-  let hookInput = {};
-  try { hookInput = JSON.parse(raw); } catch { /* record that the hook fired */ }
-  const ev = normalize(raw, hookInput);
+  let hookInput: HookInput = {};
+  try { hookInput = JSON.parse(raw) as HookInput; } catch { /* record that the hook fired */ }
+  const ev = normalize(hookInput);
   if (GATEWAY_URL && RUN_ID) {
     try {
-      await realtime(ev, hookInput);
+      await realtime(ev);
     } catch (e) {
       // Gateway unreachable: fall back to the sink so the event is not lost.
       offline(ev);
       if (kind === 'pre_tool_use') {
-        console.error(`gateway unreachable (${e.message}); allowing`);
+        console.error(`gateway unreachable (${errMessage(e)}); allowing`);
       }
     }
   } else {

@@ -3,17 +3,29 @@
 // Used by the daemon (per tool call) and the orchestrator (diff pre-review).
 // Results are cached in-process by (goal, tool, input) hash.
 //
-// CLI: node classifier.js --goal "..." --tool Bash --input "..."
+// CLI: node dist/gateway/classifier.js --goal "..." --tool Bash --input "..."
 // Prints: {"risk":"low|medium|high","reason":"..."}
-const { execFile } = require('node:child_process');
-const { createHash } = require('node:crypto');
-const { promisify } = require('node:util');
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { promisify } from 'node:util';
+import { errMessage } from '../lib/errors.js';
+import type { Risk, Verdict } from '../lib/types.js';
+
 const execFileAsync = promisify(execFile);
 
 const INPUT_CAP = 2000;
-const cache = new Map();
+const RISKS: Risk[] = ['low', 'medium', 'high'];
+const UNPARSEABLE: Verdict = { risk: 'medium', reason: 'classifier returned unparseable output' };
+const cache = new Map<string, Verdict>();
 
-function buildPrompt({ goal, tool, input }) {
+/** One tool call (or diff) to judge against the run's goal. */
+export interface ClassifyInput {
+  goal: string;
+  tool: string;
+  input: unknown;
+}
+
+function buildPrompt({ goal, tool, input }: ClassifyInput): string {
   return [
     'You are a risk classifier for an AI coding agent operating in a disposable sandbox.',
     'Judge this ONE tool call against the task goal. Respond with ONLY a JSON object, no prose:',
@@ -29,25 +41,26 @@ function buildPrompt({ goal, tool, input }) {
   ].join('\n');
 }
 
-function parseVerdict(stdout) {
-  const m = stdout.match(/\{[^{}]*"risk"[^{}]*\}/);
-  if (!m) return { risk: 'medium', reason: 'classifier returned unparseable output' };
+function parseVerdict(stdout: string): Verdict {
+  const raw = stdout.match(/\{[^{}]*"risk"[^{}]*\}/)?.[0];
+  if (!raw) return { ...UNPARSEABLE };
   try {
-    const v = JSON.parse(m[0]);
-    if (!['low', 'medium', 'high'].includes(v.risk)) throw new Error('bad risk');
-    return { risk: v.risk, reason: String(v.reason || '').slice(0, 300) };
+    const v = JSON.parse(raw) as { risk?: unknown; reason?: unknown };
+    if (!RISKS.includes(v.risk as Risk)) throw new Error('bad risk');
+    return { risk: v.risk as Risk, reason: String(v.reason || '').slice(0, 300) };
   } catch {
-    return { risk: 'medium', reason: 'classifier returned unparseable output' };
+    return { ...UNPARSEABLE };
   }
 }
 
-async function classify({ goal, tool, input }) {
+export async function classify({ goal, tool, input }: ClassifyInput): Promise<Verdict> {
   const key = createHash('sha256')
     .update([goal, tool, input].join('\0')).digest('hex');
-  if (cache.has(key)) return cache.get(key);
+  const cached = cache.get(key);
+  if (cached) return cached;
 
   const prompt = buildPrompt({ goal, tool, input });
-  let verdict;
+  let verdict: Verdict;
   try {
     const { stdout } = await execFileAsync(
       'claude', ['-p', prompt, '--max-turns', '1'],
@@ -56,17 +69,15 @@ async function classify({ goal, tool, input }) {
     verdict = parseVerdict(stdout);
   } catch (e) {
     // Classifier outage must not fail the run; deny-by-default on error.
-    verdict = { risk: 'medium', reason: `classifier error: ${e.message}` };
+    verdict = { risk: 'medium', reason: `classifier error: ${errMessage(e)}` };
   }
   cache.set(key, verdict);
   return verdict;
 }
 
-module.exports = { classify };
-
-if (require.main === module) {
+if (import.meta.main) {
   const argv = process.argv.slice(2);
-  const get = (f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : ''; };
+  const get = (f: string): string => { const i = argv.indexOf(f); return i >= 0 ? (argv[i + 1] ?? '') : ''; };
   classify({ goal: get('--goal'), tool: get('--tool'), input: get('--input') })
     .then((v) => console.log(JSON.stringify(v)));
 }

@@ -2,27 +2,42 @@
 // Task board: read-only views over the DB plus approve/reject.
 // Zero dependencies; serves HTML only (no assets, no JS framework).
 //
-// Usage: node web/server.js [--db agent.db|postgres://...] [--port 8787]
+// Usage: node dist/web/server.js [--db agent.db|postgres://...] [--port 8787]
 //   GET  /                task list with status; ?tenant=<name> filters
 //   GET  /tasks/<id>      task detail: runs, diff, findings, decision buttons
 //   GET  /threads/<id>    thread lineage
 //   GET  /anomalies       anomaly findings (pure reader of events)
 //   POST /runs/<id>/decision   body: decision=approve|reject
-const http = require('node:http');
-const { open } = require('../lib/db.js');
-const { approveRun } = require('../orchestrator/approve.js');
-const { findings } = require('../gateway/anomaly.js');
+import http from 'node:http';
+import { open } from '../lib/db.js';
+import type { Db } from '../lib/db.js';
+import { approveRun } from '../orchestrator/approve.js';
+import { findings } from '../gateway/anomaly.js';
+import { errMessage } from '../lib/errors.js';
+import type { ApprovalPayload, RunRow, TaskStatus, TaskWithTenant } from '../lib/types.js';
 
 const argv = process.argv.slice(2);
 const dbFlag = argv.indexOf('--db');
 const portFlag = argv.indexOf('--port');
-const dbSpec = dbFlag >= 0 ? argv[dbFlag + 1] : 'agent.db';
-const port = portFlag >= 0 ? Number(argv[portFlag + 1]) : 8787;
+const dbSpec = dbFlag >= 0 ? (argv[dbFlag + 1] ?? 'agent.db') : 'agent.db';
+const port = portFlag >= 0 ? Number(argv[portFlag + 1] ?? 8787) : 8787;
 
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+/** Row of the task list query: a subset of `tasks` plus the tenant name. */
+interface TaskListRow {
+  id: string;
+  goal: string;
+  status: TaskStatus;
+  created_at: string;
+  tenant: string | null;
+}
 
-function page(title, body) {
+const HTML_ESCAPES: Record<string, string> = {
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+};
+const esc = (s: unknown): string =>
+  String(s ?? '').replace(/[&<>"']/g, (c) => HTML_ESCAPES[c] ?? c);
+
+function page(title: string, body: string): string {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <title>${esc(title)}</title>
 <style>
@@ -45,14 +60,14 @@ button { padding: .3rem .8rem; }
 </style></head><body>${body}</body></html>`;
 }
 
-async function taskList(db, tenant) {
+async function taskList(db: Db, tenant: string | null): Promise<string> {
   const rows = tenant
     ? await db.prepare(`SELECT t.id, t.goal, t.status, t.created_at, tn.name AS tenant
         FROM tasks t JOIN tenants tn ON tn.id = t.tenant_id
-        WHERE tn.name = ? ORDER BY t.created_at DESC`).all(tenant)
+        WHERE tn.name = ? ORDER BY t.created_at DESC`).all<TaskListRow>(tenant)
     : await db.prepare(`SELECT t.id, t.goal, t.status, t.created_at, tn.name AS tenant
         FROM tasks t LEFT JOIN tenants tn ON tn.id = t.tenant_id
-        ORDER BY t.created_at DESC`).all();
+        ORDER BY t.created_at DESC`).all<TaskListRow>();
   const trs = rows.map((t) => `<tr>
 <td><a href="/tasks/${esc(t.id)}">${esc(t.id.slice(0, 8))}</a></td>
 <td>${esc(t.goal)}</td>
@@ -67,7 +82,7 @@ async function taskList(db, tenant) {
 <table><tr><th>task</th><th>goal</th><th>tenant</th><th>status</th><th>created_at</th></tr>${trs || '<tr><td colspan=5>暂无任务</td></tr>'}</table>`);
 }
 
-async function anomaliesPage(db) {
+async function anomaliesPage(db: Db): Promise<string> {
   const rows = await findings(db);
   const trs = rows.map((f) => `<tr>
 <td class="sev-${esc(f.severity)}">${esc(f.severity)}</td>
@@ -80,23 +95,24 @@ async function anomaliesPage(db) {
 <table><tr><th>severity</th><th>rule</th><th>run</th><th>detail</th><th>ts</th></tr>${trs || '<tr><td colspan=5>no anomalies</td></tr>'}</table>`);
 }
 
-async function taskDetail(db, taskId) {
+async function taskDetail(db: Db, taskId: string): Promise<string | null> {
   const task = await db.prepare(
     'SELECT t.*, tn.name AS tenant FROM tasks t LEFT JOIN tenants tn ON tn.id = t.tenant_id WHERE t.id = ?'
-  ).get(taskId);
+  ).get<TaskWithTenant>(taskId);
   if (!task) return null;
-  const runs = await db.prepare('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at').all(taskId);
+  const runs = await db.prepare('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at').all<RunRow>(taskId);
   const allFindings = await findings(db);
   let runHtml = '';
   for (const r of runs) {
     const diff = await db.prepare(
       "SELECT content FROM artifacts WHERE run_id = ? AND kind = 'diff' ORDER BY ts DESC LIMIT 1"
-    ).get(r.id);
-    const evRow = await db.prepare('SELECT COUNT(*) AS n FROM events WHERE run_id = ?').get(r.id);
+    ).get<{ content: string }>(r.id);
+    // COUNT(*) always yields a row.
+    const evRow = await db.prepare('SELECT COUNT(*) AS n FROM events WHERE run_id = ?').get<{ n: number }>(r.id);
     const approval = await db.prepare(
       "SELECT payload FROM events WHERE run_id = ? AND kind = 'approval' ORDER BY seq DESC LIMIT 1"
-    ).get(r.id);
-    const ap = approval ? JSON.parse(approval.payload) : null;
+    ).get<{ payload: string }>(r.id);
+    const ap = approval ? JSON.parse(approval.payload) as ApprovalPayload : null;
     const riskHtml = ap
       ? `<p class="risk-${esc(ap.risk)}">语义预审: ${esc(ap.risk)} — ${esc(ap.reason)}</p>`
       : '';
@@ -114,7 +130,7 @@ async function taskDetail(db, taskId) {
       ? `<ul>${runFindings.map((f) => `<li class="sev-${esc(f.severity)}">${esc(f.rule)}: ${esc(f.detail)}</li>`).join('')}</ul>`
       : '';
     runHtml += `<h2>run ${esc(r.id.slice(0, 8))} — <span class="status-${esc(r.status)}">${esc(r.status)}</span> (${esc(r.agent_kind)})</h2>
-<p>events: ${evRow.n} 条</p>${thread}${riskHtml}${findingsHtml}${buttons}
+<p>events: ${evRow!.n} 条</p>${thread}${riskHtml}${findingsHtml}${buttons}
 ${diff ? `<pre>${esc(diff.content)}</pre>` : '<p>无 diff 产物</p>'}`;
   }
   return page(`task ${taskId.slice(0, 8)}`, `<p><a href="/">← 返回任务台</a></p>
@@ -122,10 +138,10 @@ ${diff ? `<pre>${esc(diff.content)}</pre>` : '<p>无 diff 产物</p>'}`;
 <p>goal: ${esc(task.goal)} · tenant: ${esc(task.tenant ?? '')}</p>${runHtml}`);
 }
 
-async function threadDetail(db, threadId) {
+async function threadDetail(db: Db, threadId: string): Promise<string | null> {
   const runs = await db.prepare(
     'SELECT r.*, t.goal FROM runs r JOIN tasks t ON t.id = r.task_id WHERE r.thread_id = ? ORDER BY r.started_at'
-  ).all(threadId);
+  ).all<RunRow & { goal: string }>(threadId);
   if (runs.length === 0) return null;
   const rows = runs.map((r) => `<tr>
 <td><a href="/tasks/${esc(r.task_id)}">${esc(r.id.slice(0, 8))}</a></td>
@@ -137,52 +153,56 @@ async function threadDetail(db, threadId) {
 <table><tr><th>run</th><th>goal</th><th>status</th><th>started_at</th></tr>${rows}</table>`);
 }
 
-async function start() {
+async function start(): Promise<void> {
   const db = await open(dbSpec);
   const server = http.createServer((req, res) => { void (async () => {
-    const url = new URL(req.url, 'http://localhost');
-    let m;
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    // Routing captures are always present for the patterns below.
+    const taskMatch = url.pathname.match(/^\/tasks\/([^/]+)$/);
+    const threadMatch = url.pathname.match(/^\/threads\/([^/]+)$/);
+    const decisionMatch = url.pathname.match(/^\/runs\/([^/]+)\/decision$/);
     if (req.method === 'GET' && url.pathname === '/') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(await taskList(db, url.searchParams.get('tenant')));
     } else if (req.method === 'GET' && url.pathname === '/anomalies') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(await anomaliesPage(db));
-    } else if (req.method === 'GET' && (m = url.pathname.match(/^\/tasks\/([^/]+)$/))) {
-      const html = await taskDetail(db, m[1]);
+    } else if (req.method === 'GET' && taskMatch) {
+      const html = await taskDetail(db, taskMatch[1]!);
       if (!html) { res.writeHead(404); res.end('task not found'); return; }
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(html);
-    } else if (req.method === 'GET' && (m = url.pathname.match(/^\/threads\/([^/]+)$/))) {
-      const html = await threadDetail(db, m[1]);
+    } else if (req.method === 'GET' && threadMatch) {
+      const html = await threadDetail(db, threadMatch[1]!);
       if (!html) { res.writeHead(404); res.end('thread not found'); return; }
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(html);
-    } else if (req.method === 'POST' && (m = url.pathname.match(/^\/runs\/([^/]+)\/decision$/))) {
-      const body = await new Promise((resolve, reject) => {
+    } else if (req.method === 'POST' && decisionMatch) {
+      const body = await new Promise<string>((resolve, reject) => {
         let b = '';
-        req.on('data', (d) => (b += d));
+        req.on('data', (d: Buffer) => (b += d));
         req.on('end', () => resolve(b));
         req.on('error', reject);
       });
       const decision = new URLSearchParams(body).get('decision');
-      if (!['approve', 'reject'].includes(decision)) {
+      if (decision !== 'approve' && decision !== 'reject') {
         res.writeHead(400); res.end('bad decision'); return;
       }
       try {
-        await approveRun(db, m[1], decision);
-        const run = await db.prepare('SELECT task_id FROM runs WHERE id = ?').get(m[1]);
-        res.writeHead(303, { location: `/tasks/${run.task_id}` });
+        const runId = decisionMatch[1]!;
+        await approveRun(db, runId, decision);
+        const run = await db.prepare('SELECT task_id FROM runs WHERE id = ?').get<{ task_id: string }>(runId);
+        res.writeHead(303, { location: `/tasks/${run!.task_id}` });
         res.end();
       } catch (e) {
-        res.writeHead(409); res.end(esc(e.message));
+        res.writeHead(409); res.end(esc(errMessage(e)));
       }
     } else {
       res.writeHead(404); res.end('not found');
     }
   })().catch((e) => {
     if (!res.headersSent) res.writeHead(500);
-    res.end(esc(e.message));
+    res.end(esc(errMessage(e)));
   }); });
 
   server.listen(port, () => console.log(`agent-grid board on http://localhost:${port} (db: ${dbSpec})`));

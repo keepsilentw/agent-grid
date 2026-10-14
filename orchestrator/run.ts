@@ -2,10 +2,10 @@
 // Orchestrator driver: one task -> one run -> disposable sandbox ->
 // realtime gateway (phase 2) or offline event collection (phase 1 fallback).
 // Single-process script; a long-running orchestrator service is a later phase.
-// Execution flow lives in execute.js (shared with fork.js).
+// Execution flow lives in execute.ts (shared with fork.ts).
 //
 // Usage:
-//   node orchestrator/run.js --goal "..." [--agent claude|codex]
+//   node dist/orchestrator/run.js --goal "..." [--agent claude|codex]
 //                            [--engine docker|local] [--workspace DIR] [--db agent.db]
 //                            [--gateway 0|1] [--semantic 0|1]
 //
@@ -13,48 +13,73 @@
 // engine=local: runs the agent CLI on this machine -- dev/debug only, no isolation.
 // gateway=1 (default): starts a realtime gateway daemon for this run; hooks
 // POST tool calls to it and apply allow/deny verdicts. gateway=0: phase-1
-// offline mode, hooks append JSONL and collect.js ingests after the run.
+// offline mode, hooks append JSONL and collect.ts ingests after the run.
 // semantic=0|1 overrides policy.json's semantic switch (forwarded to daemon).
-const { randomUUID } = require('node:crypto');
-const path = require('node:path');
-const { open, isPg } = require('../lib/db.js');
-const { executeRun } = require('./execute.js');
-const { resolveTenant } = require('./tenant.js');
+import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { open, isPg } from '../lib/db.js';
+import { executeRun } from './execute.js';
+import { resolveTenant } from './tenant.js';
 
-function usage() {
-  console.error('usage: node orchestrator/run.js --goal "..." [--agent claude|codex] [--engine docker|local] [--workspace DIR] [--db agent.db] [--gateway 0|1] [--semantic 0|1]');
+interface RunArgs {
+  goal: string;
+  agent: string;
+  engine: string;
+  workspace: string;
+  db: string;
+  gateway: string;
+  semantic: string | null;
+  tenant: string;
+  isolate: string;
+}
+
+/** Everything the CLI can set except `--goal`, which the usage check pins. */
+type RunFlags = Omit<RunArgs, 'goal'>;
+
+/** Flags that take a value; every other flag is `--goal` or a usage error. */
+const VALUE_FLAGS = ['agent', 'engine', 'workspace', 'db', 'gateway', 'semantic', 'tenant', 'isolate'] as const;
+type ValueFlag = typeof VALUE_FLAGS[number];
+
+function isValueFlag(key: string): key is ValueFlag {
+  return (VALUE_FLAGS as readonly string[]).includes(key);
+}
+
+function usage(): never {
+  console.error('usage: node dist/orchestrator/run.js --goal "..." [--agent claude|codex] [--engine docker|local] [--workspace DIR] [--db agent.db] [--gateway 0|1] [--semantic 0|1]');
   process.exit(2);
 }
 
-function parseArgs(argv) {
-  const args = {
+function parseArgs(argv: string[]): RunArgs {
+  const flags: RunFlags = {
     agent: 'claude', engine: 'docker', workspace: process.cwd(), db: 'agent.db',
     gateway: '1', semantic: null, tenant: 'default', isolate: '0',
   };
+  let goal: string | undefined;
   for (let i = 0; i < argv.length; i += 2) {
-    const key = (argv[i] || '').replace(/^--/, '');
+    const key = (argv[i] ?? '').replace(/^--/, '');
     const val = argv[i + 1];
-    if (key === 'goal') args.goal = val;
-    else if (['agent', 'engine', 'workspace', 'db', 'gateway', 'semantic', 'tenant', 'isolate'].includes(key)) args[key] = val;
+    if (val === undefined) usage();
+    if (key === 'goal') goal = val;
+    else if (isValueFlag(key)) flags[key] = val;
     else usage();
   }
-  if (!args.goal || argv.length % 2 !== 0) usage();
-  return args;
+  if (!goal || argv.length % 2 !== 0) usage();
+  return { ...flags, goal };
 }
 
-async function main() {
+async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const workspace = path.resolve(args.workspace);
   const db = await open(args.db);
   const hasSchema = isPg(args.db)
-    ? (await db.prepare("SELECT to_regclass('tasks') AS t").get()).t !== null
-    : !!(await db.prepare("SELECT name FROM sqlite_master WHERE name = 'tasks'").get());
+    ? (await db.prepare("SELECT to_regclass('tasks') AS t").get<{ t: string | null }>())?.t !== null
+    : !!(await db.prepare("SELECT name FROM sqlite_master WHERE name = 'tasks'").get<{ name: string }>());
   if (!hasSchema) {
     console.error(`no schema in ${args.db}; run migrations (migrations/ for sqlite, migrations/pg/ for postgres)`);
     process.exit(2);
   }
 
-  const now = () => new Date().toISOString();
+  const now = (): string => new Date().toISOString();
   const taskId = randomUUID();
   const runId = randomUUID();
 

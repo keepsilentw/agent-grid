@@ -2,32 +2,40 @@
 // Anomaly detection (phase 3): a pure READER of `events` + `runs` -- never
 // writes. Findings are computed on demand (audit CLI, web board).
 //
-// CLI: node anomaly.js [--db agent.db|postgres://...] [--json] [--stale-hours N]
-const fs = require('node:fs');
-const path = require('node:path');
-const { open } = require('../lib/db.js');
+// CLI: node dist/gateway/anomaly.js [--db agent.db|postgres://...] [--json] [--stale-hours N]
+import fs from 'node:fs';
+import path from 'node:path';
+import { open } from '../lib/db.js';
+import type { Db } from '../lib/db.js';
+import type { Finding, Policy, Risk } from '../lib/types.js';
 
 const policy = JSON.parse(
-  fs.readFileSync(path.join(__dirname, 'policy.json'), 'utf8')
-);
+  fs.readFileSync(path.join(import.meta.dirname, 'policy.json'), 'utf8')
+) as Policy;
 const credRe = new RegExp(
-  (policy.deny_rules.find((r) => r.name === 'credential-file-read') || {}).pattern || '(?!)'
+  policy.deny_rules.find((r) => r.name === 'credential-file-read')?.pattern ?? '(?!)'
 );
 
+/** Tuneable inputs of the detector. */
+export interface FindingsOptions {
+  staleHours?: number;
+}
+
 // findings(db, {staleHours}) -> [{rule, severity, run_id, task_id, detail, ts}]
-async function findings(db, { staleHours = 24 } = {}) {
-  const out = [];
-  const withTask = async (runId) =>
-    (await db.prepare('SELECT task_id FROM runs WHERE id = ?').get(runId))?.task_id ?? null;
-  const push = async (rule, severity, runId, detail, ts) =>
+export async function findings(db: Db, { staleHours = 24 }: FindingsOptions = {}): Promise<Finding[]> {
+  const out: Finding[] = [];
+  const withTask = async (runId: string): Promise<string | null> =>
+    (await db.prepare('SELECT task_id FROM runs WHERE id = ?').get<{ task_id: string }>(runId))?.task_id ?? null;
+  const push = async (rule: string, severity: Risk, runId: string, detail: string, ts: string | null): Promise<void> => {
     out.push({ rule, severity, run_id: runId, task_id: await withTask(runId), detail, ts });
+  };
 
   // 1. deny_burst: >= 3 denied tool calls in one run (agent flailing or
   //    prompt-attack attempts).
   for (const r of await db.prepare(`
     SELECT run_id, COUNT(*) AS n, MAX(ts) AS ts FROM events
     WHERE kind = 'tool_call' AND json_extract(payload, '$.phase') = 'denied'
-    GROUP BY run_id HAVING COUNT(*) >= 3`).all()) {
+    GROUP BY run_id HAVING COUNT(*) >= 3`).all<{ run_id: string; n: number; ts: string }>()) {
     await push('deny_burst', 'high', r.run_id, `${r.n} denied tool calls`, r.ts);
   }
 
@@ -36,7 +44,8 @@ async function findings(db, { staleHours = 24 } = {}) {
     SELECT run_id, COUNT(DISTINCT json_extract(payload, '$.host')) AS hosts, MAX(ts) AS ts
     FROM events
     WHERE kind = 'network' AND json_extract(payload, '$.phase') = 'denied'
-    GROUP BY run_id HAVING COUNT(DISTINCT json_extract(payload, '$.host')) >= 2`).all()) {
+    GROUP BY run_id HAVING COUNT(DISTINCT json_extract(payload, '$.host')) >= 2`)
+    .all<{ run_id: string; hosts: number; ts: string }>()) {
     await push('network_scan', 'high', r.run_id, `${r.hosts} distinct denied hosts`, r.ts);
   }
 
@@ -44,8 +53,9 @@ async function findings(db, { staleHours = 24 } = {}) {
   //    the gateway blocked it. Regex shared with policy.json.
   for (const r of await db.prepare(`
     SELECT run_id, ts, payload FROM events
-    WHERE kind = 'tool_call' AND json_extract(payload, '$.phase') = 'pre'`).all()) {
-    if (credRe.test(JSON.stringify(JSON.parse(r.payload).tool_input ?? ''))) {
+    WHERE kind = 'tool_call' AND json_extract(payload, '$.phase') = 'pre'`)
+    .all<{ run_id: string; ts: string; payload: string }>()) {
+    if (credRe.test(JSON.stringify((JSON.parse(r.payload) as { tool_input?: unknown }).tool_input ?? ''))) {
       await push('credential_probe', 'high', r.run_id, 'tool input references credential files', r.ts);
     }
   }
@@ -53,7 +63,8 @@ async function findings(db, { staleHours = 24 } = {}) {
   // 4. high_risk_diff: pre-human review rated the diff high risk.
   for (const r of await db.prepare(`
     SELECT run_id, ts, json_extract(payload, '$.reason') AS reason FROM events
-    WHERE kind = 'approval' AND json_extract(payload, '$.risk') = 'high'`).all()) {
+    WHERE kind = 'approval' AND json_extract(payload, '$.risk') = 'high'`)
+    .all<{ run_id: string; ts: string; reason: string | null }>()) {
     await push('high_risk_diff', 'high', r.run_id, `pre-review: ${r.reason || 'high risk'}`, r.ts);
   }
 
@@ -62,7 +73,7 @@ async function findings(db, { staleHours = 24 } = {}) {
   for (const r of await db.prepare(`
     SELECT r.id AS run_id, r.started_at AS ts FROM runs r
     LEFT JOIN events e ON e.run_id = r.id
-    WHERE e.run_id IS NULL`).all()) {
+    WHERE e.run_id IS NULL`).all<{ run_id: string; ts: string | null }>()) {
     await push('silent_run', 'medium', r.run_id, 'run has zero events', r.ts);
   }
 
@@ -70,7 +81,8 @@ async function findings(db, { staleHours = 24 } = {}) {
   const cutoff = new Date(Date.now() - staleHours * 3600 * 1000).toISOString();
   for (const r of await db.prepare(`
     SELECT id AS run_id, started_at AS ts FROM runs
-    WHERE status = 'awaiting_approval' AND COALESCE(started_at, '') < ?`).all(cutoff)) {
+    WHERE status = 'awaiting_approval' AND COALESCE(started_at, '') < ?`)
+    .all<{ run_id: string; ts: string | null }>(cutoff)) {
     await push('stale_approval', 'low', r.run_id, `awaiting approval over ${staleHours}h`, r.ts);
   }
 
@@ -78,11 +90,12 @@ async function findings(db, { staleHours = 24 } = {}) {
   return out;
 }
 
-module.exports = { findings };
-
-if (require.main === module) {
+if (import.meta.main) {
   const argv = process.argv.slice(2);
-  const flag = (name, dflt) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : dflt; };
+  const flag = (name: string, dflt: string): string => {
+    const i = argv.indexOf(name);
+    return i >= 0 ? (argv[i + 1] ?? dflt) : dflt;
+  };
   const dbSpec = flag('--db', 'agent.db');
   const staleHours = Number(flag('--stale-hours', '24'));
   (async () => {

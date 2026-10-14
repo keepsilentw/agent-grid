@@ -5,7 +5,7 @@
       {
         "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "node /usr/local/bin/gateway-hook.js pre_tool_use" }
+          { "type": "command", "command": "node /usr/local/bin/gateway-hook.mjs pre_tool_use" }
         ]
       }
     ],
@@ -13,14 +13,14 @@
       {
         "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "node /usr/local/bin/gateway-hook.js post_tool_use" }
+          { "type": "command", "command": "node /usr/local/bin/gateway-hook.mjs post_tool_use" }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "node /usr/local/bin/gateway-hook.js stop" }
+          { "type": "command", "command": "node /usr/local/bin/gateway-hook.mjs stop" }
         ]
       }
     ]

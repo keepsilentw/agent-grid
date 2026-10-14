@@ -1,6 +1,8 @@
 #!/bin/sh
 # One-shot sandbox lifecycle: build -> run -> destroy.
-# Usage: run.sh <claude|codex> "<prompt>" [workspace_dir]
+# Usage: dist/sandbox/run.sh <claude|codex> "<prompt>" [workspace_dir]
+# Run it from the built tree: the docker build context is the directory above
+# this script (dist/), which is where the compiled hook and recipe live.
 # The workspace is bind-mounted at /workspace; the container is removed
 # after the agent exits (exit code propagates).
 set -eu
@@ -12,7 +14,7 @@ WORKSPACE="${3:-$PWD}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(dirname -- "$SCRIPT_DIR")
 
-# Build context is the repo root: the image also bakes in gateway/hook.js.
+# Build context is the built tree of the repo: the image bakes in gateway/hook.js.
 docker build -t agent-grid-sandbox:latest -f "$SCRIPT_DIR/Dockerfile" "$REPO_ROOT"
 
 exec docker run --rm \
